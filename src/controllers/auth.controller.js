@@ -3,6 +3,9 @@ import crypto from "crypto";
 import jwt from "jsonwebtoken"
 import config from "../config/config.js";
 import { userSession } from "../models/session.model.js";
+import { sendEmail } from "../services/email.service.js";
+import { generateOTP, getOtpHtml } from "../utils/utils.js";
+import { otpModel } from "../models/otp.model.js";
 
 
 export async function register(req,res){
@@ -29,46 +32,61 @@ export async function register(req,res){
         password:hashedPassword
     });
 
+    const otp=generateOTP();
+    const html=getOtpHtml(otp);
+
+    const otpHash= crypto.createHash("sha256").update(otp).digest("hex")
+
+    await otpModel.create({
+        email,
+        user:user._id,
+        otpHash
+    })
+
+    await sendEmail(email,"OTP Verification",`your otp code is ${otp}`, html)
+
  
 
-    const refreshtoken = jwt.sign({
-        id:user._id
-    }, config.JWT_SECRET,
-    {
-        expiresIn:"7d"
-    })
+    // const refreshtoken = jwt.sign({
+    //     id:user._id
+    // }, config.JWT_SECRET,
+    // {
+    //     expiresIn:"7d"
+    // })
 
-    const refreshTokenHash= crypto.createHash("sha256").update(refreshtoken).digest("hex")
-    const session= await userSession.create({
-        user: user._id,
-        refreshTokenHash,
-        ip:req.ip,
-        userAgent:req.headers["user-agent"]
+    // const refreshTokenHash= crypto.createHash("sha256").update(refreshtoken).digest("hex")
+    // const session= await userSession.create({
+    //     user: user._id,
+    //     refreshTokenHash,
+    //     ip:req.ip,
+    //     userAgent:req.headers["user-agent"]
 
-    })
+    // })
 
 
-    const accesstoken=jwt.sign({
-        id:user._id,
-        sessionId:session._id
-    },config.JWT_SECRET,
-    {
-        expiresIn:"15m"
-    })
+    // const accesstoken=jwt.sign({
+    //     id:user._id,
+    //     sessionId:session._id
+    // },config.JWT_SECRET,
+    // {
+    //     expiresIn:"15m"
+    // })
 
-    res.cookie("refreshtoken", refreshtoken,{
-        httpOnly:true,
-        secure:true,
-        sameSite: "strict",
-        maxAge: 7*24*60*60*1000// 7 days
-    })
+    // res.cookie("refreshtoken", refreshtoken,{
+    //     httpOnly:true,
+    //     secure:true,
+    //     sameSite: "strict",
+    //     maxAge: 7*24*60*60*1000// 7 days
+    // })
     res.status(201).json({
         message:"User registered successfully",
         user:{
             username:user.username,
-            email:user.email
-        },
-        token: accesstoken
+            email:user.email,
+            verified:user.verified
+        }
+        // ,
+        // token: accesstoken
     })
 
 }
@@ -178,5 +196,145 @@ export async function logout(req,res){
     res.clearCookie("refreshtoken")
     return res.status(200).json({
         message:"logged out successfully"
+    })
+}
+
+export async function logoutAll(req,res){
+
+    const refreshToken=req.cookies.refreshtoken;
+
+    if(!refreshToken){
+        return res.status(400).json({
+            message:"refresh token not found"
+        })
+    }
+
+    const decoded=jwt.verify(refreshToken,config.JWT_SECRET);
+
+    await userSession.updateMany({
+        user:decoded.id,
+        revoke:false
+    },{
+        revoke:true
+    })
+
+    
+
+    res.clearCookie()
+    return res.status(200).json({
+        message:"User successfully logged out from all devices"
+    })
+}
+
+export async function login(req,res){
+    const {username,password}=req.body;
+
+    if(!username || !password){
+        return res.status(401).json({
+            message:"username and password both are required"
+        })
+    }
+
+    const hashedPassword=crypto.createHash("sha256").update(password).digest("hex");
+
+    const user= await User.findOne({
+        username:username
+    })
+
+    if(!user){
+        return res.status(400).json({
+            message:"User not registered"
+        })
+    }
+
+    if(!user.verified){
+        return res.status(401).json({
+            "message":"user email not verified"
+        })
+    }
+    if(user.password !== hashedPassword){
+        return res.status(401).json({
+            message:"Invalid password"
+        })
+    }
+
+    const refreshToken=jwt.sign({
+        id:user._id
+    },config.JWT_SECRET,
+    {
+        expiresIn:"7d"
+    })
+
+    const refreshTokenHash= crypto.createHash("sha256").update(refreshToken).digest("hex")
+
+    const session= await userSession.create({
+        user: user._id,
+        refreshTokenHash,
+        ip:req.ip,
+        userAgent:req.headers["user-agent"]
+
+    })
+
+    const accessToken= jwt.sign({
+        id:user._id,
+        sessionId:session._id
+    },
+    config.JWT_SECRET,
+    {
+        expiresIn:"10m"
+    })
+
+    res.cookie("refreshtoken",refreshToken,{
+        httpOnly:true,
+        secure:true,
+        sameSite:"strict",
+        maxAge: 7*24*60*60*1000
+    })
+    return res.status(200).json({
+        message:"login successfull",
+        user:{
+            username:user.username,
+            email:user.email
+        },
+        accessToken
+    }
+    )
+
+}
+
+export async function verifyEmail(req,res){
+    const {otp, email}= req.body;
+
+    const hashedOTP=crypto.createHash("sha256").update(otp).digest("hex");
+    console.log(hashedOTP)
+
+    const otpDoc= await otpModel.findOne({
+        email,
+        otpHash:hashedOTP
+    });
+
+    if(!otpDoc){
+        return res.status(400).json({
+            message:"wrong otp"
+        })
+    }
+
+
+    const user= await User.findByIdAndUpdate(otpDoc.user,{
+        verified:true
+    },
+    {new:true})
+    
+    await otpModel.deleteMany({
+        user:otpDoc.user
+    })
+
+    return res.status(200).json({
+        message:"Email verified successfully",
+        user:{
+            username:user.username,
+            email:user.email,
+            verified:user.verified
+        }
     })
 }
